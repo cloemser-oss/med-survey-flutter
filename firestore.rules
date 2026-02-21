@@ -1,0 +1,165 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // =====================================
+    // グローバル関数定義
+    // =====================================
+    
+    // 認証済みユーザーかチェック
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // 医療スタッフかチェック（カスタムクレームを使用）
+    function isMedicalStaff() {
+      return isAuthenticated() && 
+             request.auth.token.get('role', '') == 'medical_staff';
+    }
+    
+    // 管理者かチェック
+    function isAdmin() {
+      return isAuthenticated() && 
+             request.auth.token.get('role', '') == 'admin';
+    }
+    
+    // 施設IDが一致するかチェック
+    function belongsToFacility(facilityId) {
+      return isAuthenticated() && 
+             request.auth.token.get('facilityId', '') == facilityId;
+    }
+    
+    // 患者本人かチェック（患者IDと生年月日の一致）
+    function isPatientOwner(patientId, dateOfBirth) {
+      return isAuthenticated() && 
+             request.auth.token.get('patientId', '') == patientId &&
+             request.auth.token.get('dateOfBirth', '') == dateOfBirth;
+    }
+    
+    // データの変更が許可された範囲内かチェック
+    function isValidDataUpdate() {
+      // タイムスタンプの自動更新を許可
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['updatedAt', 'lastModifiedBy']);
+    }
+    
+    // =====================================
+    // 施設 (Facilities)
+    // =====================================
+    match /facilities/{facilityId} {
+      // 読み取り: 認証済みユーザーで、所属施設のみ
+      allow read: if isAuthenticated() && belongsToFacility(facilityId);
+      
+      // 作成: 管理者のみ
+      allow create: if isAdmin();
+      
+      // 更新: 所属施設の管理者のみ
+      allow update: if isAdmin() && belongsToFacility(facilityId);
+      
+      // 削除: 不可（データ保護のため）
+      allow delete: if false;
+      
+      // =====================================
+      // 施設内の問診票 (Questionnaires)
+      // =====================================
+      match /questionnaires/{questionnaireId} {
+        // 読み取り: 認証済みユーザーで所属施設
+        allow read: if isAuthenticated() && belongsToFacility(facilityId);
+        
+        // 作成・更新: 医療スタッフまたは管理者
+        allow create, update: if (isMedicalStaff() || isAdmin()) && 
+                                  belongsToFacility(facilityId);
+        
+        // 削除: 管理者のみ
+        allow delete: if isAdmin() && belongsToFacility(facilityId);
+      }
+      
+      // =====================================
+      // 患者回答 (Patient Responses)
+      // =====================================
+      match /responses/{responseId} {
+        // 読み取り: 以下のいずれか
+        // 1. 所属施設の医療スタッフ
+        // 2. 患者本人（自分のデータのみ）
+        allow read: if (isMedicalStaff() && belongsToFacility(facilityId)) ||
+                       isPatientOwner(
+                         resource.data.patientId, 
+                         resource.data.dateOfBirth
+                       );
+        
+        // 作成: 以下のいずれか
+        // 1. 医療スタッフ
+        // 2. 患者本人（自分のデータのみ作成可能）
+        allow create: if (isMedicalStaff() && belongsToFacility(facilityId)) ||
+                         (isAuthenticated() && 
+                          request.resource.data.patientId == request.auth.token.get('patientId', '') &&
+                          request.resource.data.dateOfBirth == request.auth.token.get('dateOfBirth', ''));
+        
+        // 更新: 医療スタッフのみ（患者データの修正は医療スタッフが行う）
+        allow update: if isMedicalStaff() && belongsToFacility(facilityId);
+        
+        // 削除: 管理者のみ（データ保護のため制限）
+        allow delete: if isAdmin() && belongsToFacility(facilityId);
+      }
+      
+      // =====================================
+      // 患者基本情報設定 (Patient Basic Info Config)
+      // =====================================
+      match /config/patient_basic_info {
+        // 読み取り: 認証済みユーザーで所属施設
+        allow read: if isAuthenticated() && belongsToFacility(facilityId);
+        
+        // 作成・更新: 医療スタッフまたは管理者
+        allow create, update: if (isMedicalStaff() || isAdmin()) && 
+                                  belongsToFacility(facilityId);
+        
+        // 削除: 管理者のみ
+        allow delete: if isAdmin() && belongsToFacility(facilityId);
+      }
+      
+      // =====================================
+      // 監査ログ (Audit Logs)
+      // =====================================
+      match /audit_logs/{logId} {
+        // 読み取り: 管理者のみ
+        allow read: if isAdmin() && belongsToFacility(facilityId);
+        
+        // 作成: システムのみ（自動生成）
+        allow create: if isAuthenticated();
+        
+        // 更新・削除: 不可（改ざん防止）
+        allow update, delete: if false;
+      }
+    }
+    
+    // =====================================
+    // ユーザープロファイル (User Profiles)
+    // =====================================
+    match /users/{userId} {
+      // 読み取り: 本人または同じ施設の管理者
+      allow read: if isAuthenticated() && 
+                     (request.auth.uid == userId || 
+                      (isAdmin() && belongsToFacility(resource.data.facilityId)));
+      
+      // 作成: 本人のみ（初回登録時）
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      
+      // 更新: 本人または管理者
+      allow update: if isAuthenticated() && 
+                       (request.auth.uid == userId || 
+                        (isAdmin() && belongsToFacility(resource.data.facilityId)));
+      
+      // 削除: 管理者のみ
+      allow delete: if isAdmin();
+    }
+    
+    // =====================================
+    // デフォルトルール（全拒否）
+    // =====================================
+    // 上記のルールに該当しないパスへのアクセスはすべて拒否
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
