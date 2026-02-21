@@ -116,8 +116,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _verifyAndAccess(BuildContext dialogContext, String password) {
-    // スーパー管理者パスワード: C1oemser
-    const String correctPassword = 'C1oemser';
+    // スーパー管理者パスワード: cloemser
+    const String correctPassword = 'cloemser';
     
     if (password == correctPassword) {
       Navigator.pop(dialogContext); // ダイアログを閉じる
